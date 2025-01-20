@@ -4,6 +4,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Astra.Hosting.IdentityServe
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Base", "Base", "{367CEF38-FAA0-498D-ADDE-E780ACCA7D86}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Astra.Hosting", "Astra.Hosting\Astra.Hosting\Astra.Hosting.csproj", "{90E4007A-6333-46F2-BC96-92358A94B88A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -14,5 +16,12 @@ Global
 		{584B2913-4CAB-4312-B8BF-C525F1088CDF}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{584B2913-4CAB-4312-B8BF-C525F1088CDF}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{584B2913-4CAB-4312-B8BF-C525F1088CDF}.Release|Any CPU.Build.0 = Release|Any CPU
+		{90E4007A-6333-46F2-BC96-92358A94B88A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{90E4007A-6333-46F2-BC96-92358A94B88A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{90E4007A-6333-46F2-BC96-92358A94B88A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{90E4007A-6333-46F2-BC96-92358A94B88A}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{90E4007A-6333-46F2-BC96-92358A94B88A} = {367CEF38-FAA0-498D-ADDE-E780ACCA7D86}
 	EndGlobalSection
 EndGlobal
