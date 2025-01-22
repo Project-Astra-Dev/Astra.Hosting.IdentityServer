@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Astra.Hosting.Application;
 using Astra.Hosting.Http.Attributes;
 using Astra.Hosting.Http.Interfaces;
+using Astra.Hosting.IdentityServer.Services;
 using Microsoft.Net.Http.Headers;
 
 namespace Astra.Hosting.IdentityServer;

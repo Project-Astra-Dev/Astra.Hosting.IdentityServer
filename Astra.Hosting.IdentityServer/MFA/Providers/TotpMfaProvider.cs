@@ -1,6 +1,12 @@
-﻿namespace Astra.Hosting.IdentityServer.MFA.TOTP;
+﻿namespace Astra.Hosting.IdentityServer.MFA.Providers;
 
-public sealed class TotpMfaProvider : IMfaProvider
+public interface ITotpAuthenticationProvider
+{
+    
+}
+
+// Implementation is going to be worked on soon
+public sealed class TotpMfaProvider : ITotpAuthenticationProvider, IMfaProvider
 {
     public MfaType Mfa => MfaType.TOTP;
 }

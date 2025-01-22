@@ -7,12 +7,16 @@
     </PropertyGroup>
 
     <ItemGroup>
-      <ProjectReference Include="..\Astra.Hosting.EntityFramework\Astra.Hosting.EntityFramework\Astra.Hosting.EntityFramework.csproj" />
-      <ProjectReference Include="..\Astra.Hosting\Astra.Hosting\Astra.Hosting.csproj" />
+      <PackageReference Include="Albireo.Base32" Version="1.2.0" />
+      <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.3.1" />
     </ItemGroup>
 
     <ItemGroup>
-      <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.3.1" />
+      <ProjectReference Include="..\..\Astra.Hosting.EntityFramework\Astra.Hosting.EntityFramework\Astra.Hosting.EntityFramework.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Folder Include="Processors\" />
     </ItemGroup>
 
 </Project>

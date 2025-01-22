@@ -2,5 +2,5 @@
 
 public interface IMfaProvider
 {
-    
+    MfaType Mfa { get; }
 }

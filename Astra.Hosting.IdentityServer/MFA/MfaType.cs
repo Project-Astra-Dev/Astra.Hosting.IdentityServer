@@ -2,5 +2,6 @@
 
 public enum MfaType
 {
-    
+    TOTP,
+    GoogleAuthenticator
 }

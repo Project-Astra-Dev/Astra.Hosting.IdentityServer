@@ -8,14 +8,14 @@ using Astra.Hosting;
 using Astra.Hosting.Http;
 using Astra.Hosting.Http.Interfaces;
 using Astra.Hosting.IdentityServer.Contexts;
+using Astra.Hosting.IdentityServer.MFA;
 using Astra.Hosting.IdentityServer.Models;
-using Astra.Hosting.IdentityServer.Processors;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Serilog;
 using System.Runtime.InteropServices;
 
-namespace Astra.Hosting.IdentityServer;
+namespace Astra.Hosting.IdentityServer.Services;
 
 public class AuthorizationScopeDescriptor
 {
@@ -23,41 +23,29 @@ public class AuthorizationScopeDescriptor
     public string[] scopes;
 }
 
-public interface IAuthorizationService
-{
-    IAuthorizationService SetClientIdScopes(string clientId, string[] scopes);
-    IAuthorizationService SetAuthorizationMethods(string[] amr);
-    
-    
-    Task<IHttpSession> GetSessionAsync(IHttpRequest request);
-    Task<bool> IsAuthenticatedAsync(IUserIdentity userIdentity, string sessionId);
-    Task<IUserIdentity> CreateUserIdentityAsync(string username, [Optional] string emailAddress, [Optional] string password);
-    Task<LoginResponse> AttemptLoginAsync(string usernameOrEmail, string password, string grantType, string clientId);
-    Task<LoginResponse> AttemptLoginAsync(IUserIdentity userIdentity, string grantType, string clientId);
-    Task<bool> AttemptLogoutAsync(IUserIdentity userIdentity, string sessionId);
-    Task<bool> ValidatePasswordAsync(IUserIdentity userIdentity, string passwordUnhashed);
-    Task<bool> ResetPasswordAsync(IUserIdentity userIdentity, bool requirePasswordReset);
-    Task<bool> AddTrustedDeviceAsync(IUserIdentity userIdentity, string name, string deviceId);
-    Task<bool> RemoveTrustedDeviceAsync(IUserIdentity userIdentity, string trustId);
-    Task<bool> HasTrustedDeviceAsync(IUserIdentity userIdentity, string deviceId);
-    
-    IGrantTypeResponderRegistry GrantTypeRegistry { get; }
-}
-
 public sealed class AuthorizationService : IAuthorizationService
 {
     private static readonly ILogger _logger = ModuleInitialization.InitializeLogger(nameof(AuthorizationService));
-
-    private readonly IIdentityServerDatabaseContext _identityDatabaseContext;
-    private readonly IGrantTypeResponderRegistry _responderRegistry;
-
     private static List<AuthorizationScopeDescriptor> _authorizationScopes = new();
     private static string[] _allowedAuthenticationMethods = Array.Empty<string>();
+    
+    private readonly IIdentityServerDatabaseContext _identityServerDatabaseContext;
+    private readonly IGrantTypeResponderRegistry _responderRegistry;
 
-    public AuthorizationService(IIdentityServerDatabaseContext identityDatabaseContext)
+    public AuthorizationService(
+        IIdentityServerDatabaseContext identityServerDatabaseContext,
+        List<AuthorizationScopeDescriptor> scopeDescriptors, 
+        string[] allowedAuthenticationMethods, 
+        Type[] grantTypeResponderTypes
+    )
     {
-        _identityDatabaseContext = identityDatabaseContext;
+        _identityServerDatabaseContext = identityServerDatabaseContext;
         _responderRegistry = new GrantTypeResponderRegistry(this);
+        _authorizationScopes = scopeDescriptors.ToList();
+        _allowedAuthenticationMethods = allowedAuthenticationMethods;
+        
+        for (int i = 0; i < grantTypeResponderTypes.Length; i++)
+            _responderRegistry.Register(grantTypeResponderTypes[i]);
     }
 
     [Flags]
@@ -334,7 +322,7 @@ public sealed class AuthorizationService : IAuthorizationService
             if (!int.TryParse(session.Claims["sub"], out var userId))
                 return AstraHttpSession.Default;
 
-            var userIdentity = await _identityDatabaseContext.Accounts.FindAsync(userId);
+            var userIdentity = await _identityServerDatabaseContext.Accounts.FindAsync(userId);
             if (userIdentity == null || !await IsAuthenticatedAsync(userIdentity, session.Claims["sid"]))
                 return AstraHttpSession.Default;
             return session;
@@ -343,18 +331,18 @@ public sealed class AuthorizationService : IAuthorizationService
     }
 
     public async Task<bool> IsAuthenticatedAsync(IUserIdentity userIdentity, string sessionId)
-        => await _identityDatabaseContext.ActiveSessions.AnyAsync(x => x.UserId == userIdentity.UserId && x.SessionId == sessionId);
+        => await _identityServerDatabaseContext.ActiveSessions.AnyAsync(x => x.UserId == userIdentity.UserId && x.SessionId == sessionId);
 
     public async Task<IUserIdentity> CreateUserIdentityAsync(string username, [Optional] string emailAddress, [Optional] string password)
     {
-        int newUserId = _identityDatabaseContext.Accounts.Count() + 1;
+        int newUserId = _identityServerDatabaseContext.Accounts.Count() + 1;
         var securityKeyPair = UserIdentityModel.CreateKeyPair();
         var userIdentity = new UserIdentityModel
         {
             UserId = newUserId,
             Uuid = Guid.NewGuid().ToString(),
             Username = username,
-            Email = username,
+            Email = emailAddress,
             Fingerprint = securityKeyPair.fingerprint,
             PublicKey = securityKeyPair.pub,
             PrivateKey = securityKeyPair.priv,
@@ -366,14 +354,14 @@ public sealed class AuthorizationService : IAuthorizationService
         
         if (!string.IsNullOrEmpty(password))
             userIdentity.PasswordHash = PasswordManager.HashPassword(password);
-        await _identityDatabaseContext.Accounts.AddAsync(userIdentity);
-        await _identityDatabaseContext.SaveChangesAsync();
+        await _identityServerDatabaseContext.Accounts.AddAsync(userIdentity);
+        await _identityServerDatabaseContext.SaveChangesAsync();
         return userIdentity;
     }
 
     public async Task<LoginResponse> AttemptLoginAsync(string usernameOrEmail, string password, string grantType, string clientId)
     {
-        var managedAccount = await _identityDatabaseContext.Accounts
+        var managedAccount = await _identityServerDatabaseContext.Accounts
             .FirstOrDefaultAsync(u => u.Username == usernameOrEmail || u.Email == usernameOrEmail);
         if (managedAccount == null)
             return LoginResponse.Failure(OAuthErrorCode.AccessDenied);
@@ -389,25 +377,25 @@ public sealed class AuthorizationService : IAuthorizationService
                 ErrorDescription = tokenGenerationResult.errorDescription
             };
 
-        await _identityDatabaseContext.ActiveSessions.AddAsync(new ActiveSession
+        await _identityServerDatabaseContext.ActiveSessions.AddAsync(new ActiveSession
         {
             SessionId = sessionId,
             UserId = managedAccount.UserId,
             AuthenticatedAt = DateTime.UtcNow,
             SessionType = SessionType.AuthenticatedViaPassword
         });
-        await _identityDatabaseContext.SaveChangesAsync();
+        await _identityServerDatabaseContext.SaveChangesAsync();
 
-        return new LoginResponse
-        {
-            AccessToken = tokenGenerationResult.token,
-            RefreshToken = Hashing.SHA1(managedAccount.SecurityStamp + DateTime.Now.Ticks + 2)
-        };
+        return LoginResponse.Success(
+            tokenGenerationResult.token,
+            Hashing.SHA1(managedAccount.SecurityStamp + DateTime.Now.Ticks + 2),
+            sessionId
+        );
     }
 
     public async Task<LoginResponse> AttemptLoginAsync(IUserIdentity userIdentity, string grantType, string clientId)
     {
-        var managedAccount = await _identityDatabaseContext.Accounts
+        var managedAccount = await _identityServerDatabaseContext.Accounts
             .Include(u => u.ActiveSessions)
             .FirstOrDefaultAsync(u => u.UserId == userIdentity.UserId);
         
@@ -422,38 +410,51 @@ public sealed class AuthorizationService : IAuthorizationService
                 ErrorDescription = tokenGenerationResult.errorDescription
             };
 
-        await _identityDatabaseContext.ActiveSessions.AddAsync(new ActiveSession
+        await _identityServerDatabaseContext.ActiveSessions.AddAsync(new ActiveSession
         {
             SessionId = sessionId,
             UserId = managedAccount.UserId,
             AuthenticatedAt = DateTime.UtcNow,
             SessionType = SessionType.DirectlyAuthenticated
         });
-        await _identityDatabaseContext.SaveChangesAsync();
+        await _identityServerDatabaseContext.SaveChangesAsync();
         
-        return new LoginResponse
-        {
-            AccessToken = tokenGenerationResult.token,
-            RefreshToken = Hashing.SHA1(managedAccount.SecurityStamp + DateTime.Now.Ticks + 1)
-        };
+        return LoginResponse.Success(
+            tokenGenerationResult.token,
+            Hashing.SHA1(managedAccount.SecurityStamp + DateTime.Now.Ticks + 1),
+            sessionId
+        );
     }
 
+    public async Task<bool> AttemptLogoutAsync(IUserIdentity userIdentity)
+    {
+        var managedAccount = await _identityServerDatabaseContext.Accounts
+            .Include(u => u.ActiveSessions)
+            .FirstOrDefaultAsync(u => u.UserId == userIdentity.UserId);
+        if (managedAccount == null) 
+            return false;
+        
+        managedAccount.ActiveSessions.RemoveAll(x => true);
+        await _identityServerDatabaseContext.SaveChangesAsync();
+        return true;
+    }
+    
     public async Task<bool> AttemptLogoutAsync(IUserIdentity userIdentity, string sessionId)
     {
-        var managedAccount = await _identityDatabaseContext.Accounts
+        var managedAccount = await _identityServerDatabaseContext.Accounts
             .Include(u => u.ActiveSessions)
             .FirstOrDefaultAsync(u => u.UserId == userIdentity.UserId);
         if (managedAccount == null) 
             return false;
         
         managedAccount.ActiveSessions.RemoveAll(x => x.SessionId == sessionId);
-        await _identityDatabaseContext.SaveChangesAsync();
+        await _identityServerDatabaseContext.SaveChangesAsync();
         return true;
     }
 
     public async Task<bool> ValidatePasswordAsync(IUserIdentity userIdentity, string passwordUnhashed)
     {
-        var managedAccount = await _identityDatabaseContext.Accounts.FindAsync(userIdentity.UserId);
+        var managedAccount = await _identityServerDatabaseContext.Accounts.FindAsync(userIdentity.UserId);
         if (managedAccount == null) 
             return false;
         return PasswordManager.ValidatePassword(passwordUnhashed, managedAccount.PasswordHash);
@@ -461,7 +462,7 @@ public sealed class AuthorizationService : IAuthorizationService
 
     public async Task<bool> ResetPasswordAsync(IUserIdentity userIdentity, bool requirePasswordReset)
     {
-        var managedAccount = await _identityDatabaseContext.Accounts
+        var managedAccount = await _identityServerDatabaseContext.Accounts
             .Include(u => u.ActiveSessions)
             .FirstOrDefaultAsync(u => u.UserId == userIdentity.UserId);
         if (managedAccount == null) 
@@ -471,18 +472,18 @@ public sealed class AuthorizationService : IAuthorizationService
         managedAccount.PasswordHash = PasswordManager.GeneratePassword(7, PasswordCharacterSets.Letters | PasswordCharacterSets.Numbers);
         
         managedAccount.ActiveSessions.RemoveAll(x => x.UserId == userIdentity.UserId);
-        await _identityDatabaseContext.SaveChangesAsync();
+        await _identityServerDatabaseContext.SaveChangesAsync();
         return true;
     }
 
     public async Task<bool> AddTrustedDeviceAsync(IUserIdentity userIdentity, string name, string deviceId)
     {
-        var managedAccount = await _identityDatabaseContext.Accounts
+        var managedAccount = await _identityServerDatabaseContext.Accounts
             .Include(u => u.TrustedDevices)
             .FirstOrDefaultAsync(u => u.UserId == userIdentity.UserId);
         if (managedAccount == null) return false;
 
-        await _identityDatabaseContext.TrustedDevices.AddAsync(new TrustedDevice
+        await _identityServerDatabaseContext.TrustedDevices.AddAsync(new TrustedDevice
         {
             TrustId = Guid.NewGuid().ToString(),
             Name = name + " (Trusted by Identity Server)",
@@ -491,32 +492,32 @@ public sealed class AuthorizationService : IAuthorizationService
             UserId = managedAccount.UserId
         });
         
-        await _identityDatabaseContext.SaveChangesAsync();
+        await _identityServerDatabaseContext.SaveChangesAsync();
         return true;
     }
 
     public async Task<bool> RemoveTrustedDeviceAsync(IUserIdentity userIdentity, string trustId)
     {
-        var managedAccount = await _identityDatabaseContext.Accounts
+        var managedAccount = await _identityServerDatabaseContext.Accounts
             .Include(u => u.TrustedDevices)
             .FirstOrDefaultAsync(u => u.UserId == userIdentity.UserId);
         if (managedAccount == null) return false;
 
-        var trustedDevice = await _identityDatabaseContext.TrustedDevices.FindAsync(trustId);
+        var trustedDevice = await _identityServerDatabaseContext.TrustedDevices.FindAsync(trustId);
         if (trustedDevice == null) return false;
         
-        _identityDatabaseContext.TrustedDevices.Remove(trustedDevice);
+        _identityServerDatabaseContext.TrustedDevices.Remove(trustedDevice);
         return true;
     }
 
     public async Task<bool> HasTrustedDeviceAsync(IUserIdentity userIdentity, string deviceId)
     {
-        var managedAccount = await _identityDatabaseContext.Accounts
+        var managedAccount = await _identityServerDatabaseContext.Accounts
             .Include(u => u.TrustedDevices)
             .FirstOrDefaultAsync(u => u.UserId == userIdentity.UserId);
         if (managedAccount == null) return false;
 
-        return await _identityDatabaseContext.TrustedDevices
+        return await _identityServerDatabaseContext.TrustedDevices
             .AnyAsync(d => d.UserId == managedAccount.UserId && d.DeviceId == deviceId);
     }
 

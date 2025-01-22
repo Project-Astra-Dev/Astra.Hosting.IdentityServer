@@ -7,6 +7,8 @@ public interface IUserIdentity
 {
     int UserId { get; }
     string Uuid { get; }
+    string Username { get; }
+    string Email { get; }
     bool PasswordResetRequired { get; }
     string SecurityStamp { get; }
     string[] Roles { get; }
@@ -35,6 +37,8 @@ public sealed class UserIdentityModel : IUserIdentity
     
     [Key] public int UserId { get; set; } = 0;
     public string Uuid { get; set; } = string.Empty;
+    public string Username { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
     public string PasswordHash { get; set; } = string.Empty;
     public bool PasswordResetRequired { get; set; } = true;
     public string SecurityStamp { get; set; } = string.Empty;

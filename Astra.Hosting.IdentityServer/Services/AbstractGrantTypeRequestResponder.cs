@@ -2,7 +2,7 @@
 using Astra.Hosting.IdentityServer.Contexts;
 using Astra.Hosting.IdentityServer.Models;
 
-namespace Astra.Hosting.IdentityServer.Processors;
+namespace Astra.Hosting.IdentityServer.Services;
 
 public interface IGrantTypeRequestResponder
 {

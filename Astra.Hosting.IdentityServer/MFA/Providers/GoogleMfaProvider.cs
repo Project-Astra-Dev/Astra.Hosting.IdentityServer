@@ -1,14 +1,16 @@
-﻿using Astra.Hosting.Application;
+﻿using Albireo.Base32;
+using Astra.Hosting.Application;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace Astra.Hosting.IdentityServer.MFA.Google;
+namespace Astra.Hosting.IdentityServer.MFA.Providers;
 
 public interface IGoogleAuthenticationProvider
 {
-    Task<byte[]> GenerateProvisionAsync(string identifier, int width, int height);
-    Task<string> GeneratePinAsync();
+    Task<string> GenerateSecretKey();
+    Task<string> GenerateProvisionUrlAsync(byte[] key, string identifier);
+    Task<string> GeneratePinAsync(byte[] key, TimeSpan timeDrift);
 }
 
 public sealed class GoogleMfaProvider : IGoogleAuthenticationProvider, IMfaProvider
@@ -19,25 +21,21 @@ public sealed class GoogleMfaProvider : IGoogleAuthenticationProvider, IMfaProvi
     private static readonly DateTime _unixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
     
     private readonly IHostConfiguration _configuration;
-    private readonly byte[] _secretKey;
+    private readonly string _issuerName;
     private readonly HttpClient _httpClient;
     
     public GoogleMfaProvider(IHostConfiguration configuration)
     {
         _configuration = configuration;
-        _secretKey = Convert.FromBase64String(
-            _configuration.GetValue<string>("GoogleAuthentication:SecretKey")
-        );
-        
+        _issuerName = configuration.GetValue("GoogleAuthentication:IssuerName", "Application");
         _httpClient = new HttpClient();
     }
 
-    private async Task<byte[]> InternalGenerateProvisionAsync(string identifier, byte[] key, int width, int height)
+    private async Task<string> InternalGenerateProvisionUrlAsync(string identifier, byte[] key)
     {
-        var keyString = Encoder.Base32Encode(key);
-        var provisionUrl = Encoder.UrlEncode($"otpauth://totp/{identifier}?secret={keyString}");
-        var chartUrl = $"https://chart.apis.google.com/chart?cht=qr&chs={width}x{height}&chl={provisionUrl}";
-        return await _httpClient.GetByteArrayAsync(chartUrl);
+        ArgumentNullException.ThrowIfNull(identifier);
+        var keyString = Base32.Encode(key);
+        return $"otpauth://totp/{_issuerName}:{identifier}?secret={keyString}&issuer={_issuerName}";
     }
     
     private async Task<string> InternalGeneratePinAsync(byte[] key, long counter)
@@ -65,72 +63,26 @@ public sealed class GoogleMfaProvider : IGoogleAuthenticationProvider, IMfaProvi
         return pinString.ToString(CultureInfo.InvariantCulture).PadLeft(PIN_LENGTH, '0');
     }
     
-    public async Task<byte[]> GenerateProvisionAsync(string identifier, int width, int height) 
-        => await InternalGenerateProvisionAsync(identifier, _secretKey, width, height);
-    public async Task<string> GeneratePinAsync() => await InternalGeneratePinAsync(_secretKey, CurrentInterval);
+    private long InternalGetCurrentInterval(TimeSpan userTimeDrift)
+    {
+        if (userTimeDrift.TotalHours is > 24 or < -24)
+            throw new ArgumentOutOfRangeException(nameof(userTimeDrift), "Time drift must be within ±24 hours");
+        
+        var adjustedTime = DateTime.UtcNow.Add(userTimeDrift);
+        return (long)Math.Floor((adjustedTime - _unixEpoch).TotalSeconds / INTERVAL_LENGTH);
+    }
+
+    public async Task<string> GenerateSecretKey()
+    {
+        var keyBytes = new byte[20];
+        RandomNumberGenerator.Fill(keyBytes);
+        return Base32.Encode(keyBytes);
+    }
+    
+    public async Task<string> GenerateProvisionUrlAsync(byte[] key, string identifier) 
+        => await InternalGenerateProvisionUrlAsync(identifier, key);
+    public async Task<string> GeneratePinAsync(byte[] key, TimeSpan timeDrift) 
+        => await InternalGeneratePinAsync(key, InternalGetCurrentInterval(timeDrift));
     
     public MfaType Mfa => MfaType.GoogleAuthenticator;
-    public long CurrentInterval => (long)Math.Floor((DateTime.UtcNow - _unixEpoch).TotalSeconds) / INTERVAL_LENGTH;
-    
-    static class Encoder
-    {
-        internal static string UrlEncode(string value)
-        {
-            const string URL_ENCODE_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~";
-
-            var builder = new StringBuilder();
-            for (var i = 0; i < value.Length; i++)
-            {
-                var symbol = value[i];
-                if (URL_ENCODE_ALPHABET.IndexOf(symbol) != -1)
-                    builder.Append(symbol);
-                else
-                {
-                    builder.Append('%');
-                    builder.Append(((int)symbol).ToString("X2"));
-                }
-            }
-
-            return builder.ToString();
-        }
-
-        internal static string Base32Encode(byte[] data)
-        {
-            const int IN_BYTE_SIZE = 8;
-            const int OUT_BYTE_SIZE = 5;
-            const string BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-
-            int i = 0, index = 0;
-            var builder = new StringBuilder((data.Length + 7) * IN_BYTE_SIZE/ OUT_BYTE_SIZE);
-            while (i < data.Length)
-            {
-                int currentByte = data[i];
-                int digit;
-                
-                if (index > (IN_BYTE_SIZE - OUT_BYTE_SIZE))
-                {
-                    int nextByte;
-                    if ((i + 1) < data.Length)
-                        nextByte = data[i + 1];
-                    else nextByte = 0;
-
-                    digit = currentByte & (0xFF >> index);
-                    index = (index + OUT_BYTE_SIZE) % IN_BYTE_SIZE;
-                    digit <<= index;
-                    digit |= nextByte >> (IN_BYTE_SIZE - index);
-                    i++;
-                }
-                else
-                {
-                    digit = (currentByte >> (IN_BYTE_SIZE - (index + OUT_BYTE_SIZE))) & 0x1F;
-                    index = (index + OUT_BYTE_SIZE) % IN_BYTE_SIZE;
-                    if (index == 0) i++;
-                }
-
-                builder.Append(BASE32_ALPHABET[digit]);
-            }
-
-            return builder.ToString();
-        }
-    }
 }
