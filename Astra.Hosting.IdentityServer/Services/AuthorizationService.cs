@@ -13,6 +13,7 @@ using Astra.Hosting.IdentityServer.Processors;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Serilog;
+using System.Runtime.InteropServices;
 
 namespace Astra.Hosting.IdentityServer;
 
@@ -26,9 +27,12 @@ public interface IAuthorizationService
 {
     IAuthorizationService SetClientIdScopes(string clientId, string[] scopes);
     IAuthorizationService SetAuthorizationMethods(string[] amr);
+    
+    
     Task<IHttpSession> GetSessionAsync(IHttpRequest request);
     Task<bool> IsAuthenticatedAsync(IUserIdentity userIdentity, string sessionId);
-    Task<IUserIdentity> CreateUserIdentityAsync(string username);
+    Task<IUserIdentity> CreateUserIdentityAsync(string username, [Optional] string emailAddress, [Optional] string password);
+    Task<LoginResponse> AttemptLoginAsync(string usernameOrEmail, string password, string grantType, string clientId);
     Task<LoginResponse> AttemptLoginAsync(IUserIdentity userIdentity, string grantType, string clientId);
     Task<bool> AttemptLogoutAsync(IUserIdentity userIdentity, string sessionId);
     Task<bool> ValidatePasswordAsync(IUserIdentity userIdentity, string passwordUnhashed);
@@ -43,34 +47,34 @@ public interface IAuthorizationService
 public sealed class AuthorizationService : IAuthorizationService
 {
     private static readonly ILogger _logger = ModuleInitialization.InitializeLogger(nameof(AuthorizationService));
-    
+
     private readonly IIdentityServerDatabaseContext _identityDatabaseContext;
     private readonly IGrantTypeResponderRegistry _responderRegistry;
-    
+
     private static List<AuthorizationScopeDescriptor> _authorizationScopes = new();
     private static string[] _allowedAuthenticationMethods = Array.Empty<string>();
-    
+
     public AuthorizationService(IIdentityServerDatabaseContext identityDatabaseContext)
     {
         _identityDatabaseContext = identityDatabaseContext;
         _responderRegistry = new GrantTypeResponderRegistry(this);
     }
-    
+
     [Flags]
     public enum PasswordCharacterSets
     {
-        None     = 0,
-        Letters  = 1 << 0,  // Includes both upper and lowercase
-        Numbers  = 1 << 1,
-        Symbols  = 1 << 2,
-        All      = Letters | Numbers | Symbols
+        None = 0,
+        Letters = 1 << 0, // Includes both upper and lowercase
+        Numbers = 1 << 1,
+        Symbols = 1 << 2,
+        All = Letters | Numbers | Symbols
     }
 
     public static class PasswordManager
     {
         private const int KEY_SIZE = 64;
         private const int ITERATIONS = 5000;
-        
+
         private static readonly char[] _lowercaseLetters = "abcdefghijklmnopqrstuvwxyz".ToCharArray();
         private static readonly char[] _uppercaseLetters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".ToCharArray();
         private static readonly char[] _numbers = "0123456789".ToCharArray();
@@ -85,7 +89,7 @@ public sealed class AuthorizationService : IAuthorizationService
 
             var password = new char[length];
             var availablePositions = Enumerable.Range(0, length).ToList();
-            
+
             if (options.HasFlag(PasswordCharacterSets.Letters))
             {
                 InsertRandomCharacter(password, availablePositions, _lowercaseLetters);
@@ -117,10 +121,10 @@ public sealed class AuthorizationService : IAuthorizationService
             int positionIndex = RandomNumberGenerator.GetInt32(availablePositions.Count);
             int position = availablePositions[positionIndex];
             availablePositions.RemoveAt(positionIndex);
-            
+
             password[position] = characterSet[RandomNumberGenerator.GetInt32(characterSet.Length)];
         }
-        
+
         public static string HashPassword(string password)
         {
             if (string.IsNullOrEmpty(password))
@@ -141,7 +145,7 @@ public sealed class AuthorizationService : IAuthorizationService
         {
             if (string.IsNullOrEmpty(password))
                 throw new ArgumentException("Password cannot be empty", nameof(password));
-                
+
             if (string.IsNullOrEmpty(hashedPassword))
                 throw new ArgumentException("Hashed password cannot be empty", nameof(hashedPassword));
 
@@ -171,16 +175,16 @@ public sealed class AuthorizationService : IAuthorizationService
             return hash;
         }
     }
-    
+
     // jwt token manager
     public static class TokenManager
     {
         public static readonly TimeSpan GlobalTokenExpiry = TimeSpan.FromHours(10);
-        
+
         public static byte[] GetSecretKey()
         {
-            string filePath = OperatingSystem.IsWindows() 
-                ? Path.Combine(Environment.CurrentDirectory, "usr/secret") 
+            string filePath = OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.CurrentDirectory, "usr/secret")
                 : "/usr/secret";
 
             if (!File.Exists(filePath))
@@ -191,32 +195,32 @@ public sealed class AuthorizationService : IAuthorizationService
         public static string[] GetClaimsForClientId(string clientId)
             => _authorizationScopes.FirstOrDefault(x => x.clientId == clientId, defaultValue: null)?.scopes
                 ?? Array.Empty<string>();
-        
+
         public static string GetJwtPassword()
         {
-            string filePath = OperatingSystem.IsWindows() 
-                ? Path.Combine(Environment.CurrentDirectory, "usr/jwt/password") 
+            string filePath = OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.CurrentDirectory, "usr/jwt/password")
                 : "/usr/jwt/password";
 
             if (!File.Exists(filePath))
                 return string.Empty;
             return File.ReadAllText(filePath);
         }
-        
+
         public static (bool success, string token, string? error, string? errorDescription) GenerateToken(IUserIdentity userIdentity, string clientId, out string sessionId)
         {
             sessionId = string.Empty;
-            
+
             var tokenHandler = new JwtSecurityTokenHandler();
             var key = GetSecretKey();
             if (key.Length == 0) return (false, string.Empty, "invalid_request", "(server) /usr/secret does not exist");
-            
+
             var scopes = GetClaimsForClientId(clientId);
             if (scopes.Length == 0) return (false, string.Empty, "invalid_client", "(server) invalid client_id provided");
-            
+
             sessionId = Guid.NewGuid().ToString();
             var claimsIdentity = new ClaimsIdentity();
-            
+
             claimsIdentity.AddClaim(new Claim("client_id", "recroom"));
             claimsIdentity.AddClaim(new Claim("auth_time", DateTime.UtcNow.Ticks.ToString()));
             claimsIdentity.AddClaim(new Claim("idp", "local"));
@@ -229,7 +233,7 @@ public sealed class AuthorizationService : IAuthorizationService
             claimsIdentity.AddClaim(new Claim("scope", JsonSerializer.Serialize(scopes), JsonClaimValueTypes.JsonArray));
             claimsIdentity.AddClaim(new Claim("amr", JsonSerializer.Serialize(_allowedAuthenticationMethods), JsonClaimValueTypes.JsonArray));
             claimsIdentity.AddClaim(new Claim("sid", sessionId));
-            
+
             var tokenDescriptor = new SecurityTokenDescriptor()
             {
                 IncludeKeyIdInHeader = true,
@@ -248,7 +252,7 @@ public sealed class AuthorizationService : IAuthorizationService
                     SecurityAlgorithms.RsaSha256Signature)
                 #endif
             };
-    
+
             var token = tokenHandler.CreateToken(tokenDescriptor);
             return (true, tokenHandler.WriteToken(token), null, null);
         }
@@ -257,7 +261,7 @@ public sealed class AuthorizationService : IAuthorizationService
         {
             validatedToken = null;
             var tokenHandler = new JwtSecurityTokenHandler();
-            
+
             var key = GetSecretKey();
             if (key.Length == 0) return false;
 
@@ -274,7 +278,7 @@ public sealed class AuthorizationService : IAuthorizationService
                     ClockSkew = TimeSpan.Zero
                 }, out var securityToken);
                 validatedToken = (JwtSecurityToken)securityToken;
-                
+
                 return true;
             }
             catch { return false; }
@@ -314,10 +318,10 @@ public sealed class AuthorizationService : IAuthorizationService
                         string.Join(",", group.Select(x => x.Value))))
                     .ToList().ToDictionary()
                 : new List<KeyValuePair<string, string>>().ToDictionary();
-            
+
             var roles = claims.Any(x => x.Key == "role") ? claims["role"].Split(',', StringSplitOptions.RemoveEmptyEntries).ToList() : [];
             var scopes = claims.Any(x => x.Key == "scope") ? claims["scope"].Split(',', StringSplitOptions.RemoveEmptyEntries).ToList() : [];
-            
+
             var session = AstraHttpSession.New(
                 Guid.Empty.ToString(),
                 "Bearer",
@@ -326,10 +330,10 @@ public sealed class AuthorizationService : IAuthorizationService
                 scopes,
                 claims.ToDictionary()
             );
-            
+
             if (!int.TryParse(session.Claims["sub"], out var userId))
                 return AstraHttpSession.Default;
-            
+
             var userIdentity = await _identityDatabaseContext.Accounts.FindAsync(userId);
             if (userIdentity == null || !await IsAuthenticatedAsync(userIdentity, session.Claims["sid"]))
                 return AstraHttpSession.Default;
@@ -337,11 +341,11 @@ public sealed class AuthorizationService : IAuthorizationService
         }
         return AstraHttpSession.Default;
     }
-    
+
     public async Task<bool> IsAuthenticatedAsync(IUserIdentity userIdentity, string sessionId)
         => await _identityDatabaseContext.ActiveSessions.AnyAsync(x => x.UserId == userIdentity.UserId && x.SessionId == sessionId);
 
-    public async Task<IUserIdentity> CreateUserIdentityAsync(string username)
+    public async Task<IUserIdentity> CreateUserIdentityAsync(string username, [Optional] string emailAddress, [Optional] string password)
     {
         int newUserId = _identityDatabaseContext.Accounts.Count() + 1;
         var securityKeyPair = UserIdentityModel.CreateKeyPair();
@@ -349,6 +353,8 @@ public sealed class AuthorizationService : IAuthorizationService
         {
             UserId = newUserId,
             Uuid = Guid.NewGuid().ToString(),
+            Username = username,
+            Email = username,
             Fingerprint = securityKeyPair.fingerprint,
             PublicKey = securityKeyPair.pub,
             PrivateKey = securityKeyPair.priv,
@@ -358,9 +364,45 @@ public sealed class AuthorizationService : IAuthorizationService
             Roles = ["user"],
         };
         
+        if (!string.IsNullOrEmpty(password))
+            userIdentity.PasswordHash = PasswordManager.HashPassword(password);
         await _identityDatabaseContext.Accounts.AddAsync(userIdentity);
         await _identityDatabaseContext.SaveChangesAsync();
         return userIdentity;
+    }
+
+    public async Task<LoginResponse> AttemptLoginAsync(string usernameOrEmail, string password, string grantType, string clientId)
+    {
+        var managedAccount = await _identityDatabaseContext.Accounts
+            .FirstOrDefaultAsync(u => u.Username == usernameOrEmail || u.Email == usernameOrEmail);
+        if (managedAccount == null)
+            return LoginResponse.Failure(OAuthErrorCode.AccessDenied);
+
+        if (!PasswordManager.ValidatePassword(password, managedAccount.PasswordHash))
+            return LoginResponse.Failure(OAuthErrorCode.AccessDenied);
+
+        var tokenGenerationResult = TokenManager.GenerateToken(managedAccount, clientId, out var sessionId);
+        if (!tokenGenerationResult.success)
+            return new LoginResponse
+            {
+                Error = tokenGenerationResult.error,
+                ErrorDescription = tokenGenerationResult.errorDescription
+            };
+
+        await _identityDatabaseContext.ActiveSessions.AddAsync(new ActiveSession
+        {
+            SessionId = sessionId,
+            UserId = managedAccount.UserId,
+            AuthenticatedAt = DateTime.UtcNow,
+            SessionType = SessionType.AuthenticatedViaPassword
+        });
+        await _identityDatabaseContext.SaveChangesAsync();
+
+        return new LoginResponse
+        {
+            AccessToken = tokenGenerationResult.token,
+            RefreshToken = Hashing.SHA1(managedAccount.SecurityStamp + DateTime.Now.Ticks + 2)
+        };
     }
 
     public async Task<LoginResponse> AttemptLoginAsync(IUserIdentity userIdentity, string grantType, string clientId)
@@ -370,11 +412,7 @@ public sealed class AuthorizationService : IAuthorizationService
             .FirstOrDefaultAsync(u => u.UserId == userIdentity.UserId);
         
         if (managedAccount == null) 
-            return new LoginResponse
-            {
-                Error = "access_denied", 
-                ErrorDescription = "(server) invalid user identity"
-            };
+            return LoginResponse.Failure(OAuthErrorCode.Unknown);
         
         var tokenGenerationResult = TokenManager.GenerateToken(managedAccount, clientId, out var sessionId);
         if (!tokenGenerationResult.success) 
@@ -389,6 +427,7 @@ public sealed class AuthorizationService : IAuthorizationService
             SessionId = sessionId,
             UserId = managedAccount.UserId,
             AuthenticatedAt = DateTime.UtcNow,
+            SessionType = SessionType.DirectlyAuthenticated
         });
         await _identityDatabaseContext.SaveChangesAsync();
         
